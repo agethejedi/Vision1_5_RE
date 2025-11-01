@@ -1,3 +1,4 @@
+import './ui/ScoreMeter.js?v=2025-11-02';
 import './graph.js?v=2025-11-02';
 
 const worker = new Worker('./workers/visionRisk.worker.js', { type: 'module' });
