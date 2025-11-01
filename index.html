@@ -6,6 +6,7 @@
   <title>RiskXLabs — Vision</title>
   <link rel="icon" href="./assets/favicon.png" type="image/png"/>
   <link rel="stylesheet" href="./styles.css"/>
+  <!-- Config (sets window.VisionConfig.API_BASE, etc.) -->
   <script type="module" src="./config.js"></script>
 </head>
 <body>
@@ -28,7 +29,10 @@
     <section class="left">
       <div class="panel">
         <h3 class="panel-title">Graph</h3>
-        <canvas id="graphCanvas" width="1080" height="720" aria-label="Network graph"></canvas>
+
+        <!-- IMPORTANT: the SVG renderer writes inside this div -->
+        <div id="graph" class="graph-canvas" aria-label="Network graph"></div>
+
         <div class="panel-row">
           <input id="seedInput" class="input" placeholder="Seed address (0x…)" />
           <button id="loadSeedBtn" class="btn">Load</button>
@@ -40,7 +44,22 @@
     <section class="right">
       <div class="panel">
         <h3 class="panel-title">Details</h3>
-        <rx-score id="scorePanel" size="200"></rx-score>
+
+        <!-- Score panel container used by ScoreMeter('#scorePanel') -->
+        <div id="scorePanel" class="score-panel">
+          <div class="meter">
+            <svg viewBox="0 0 100 100" class="ring">
+              <circle cx="50" cy="50" r="45" class="track" fill="none" stroke-width="8"></circle>
+              <circle cx="50" cy="50" r="45" class="arc"   fill="none" stroke-width="8" stroke-linecap="round" stroke-dasharray="0 999"></circle>
+            </svg>
+            <div class="label">
+              <div class="score-text">0</div>
+              <div class="score-sub">Moderate</div>
+            </div>
+          </div>
+          <div class="reasons"></div>
+        </div>
+
         <div id="entityMeta" class="meta"></div>
       </div>
 
@@ -55,10 +74,7 @@
     <span>© RiskXLabs — We Fight Fraud</span>
   </footer>
 
-  <script type="module" src="./ui/ScoreMeter.js"></script>
-  <script type="module" src="./cache/lru.js"></script>
-  <script type="module" src="./adapters/evm.js"></script>
-  <script type="module" src="./graph.js"></script>
+  <!-- Only load the app entry; it imports the other modules. Avoid double-loading to keep CSP happy. -->
   <script type="module" src="./app.js"></script>
 </body>
 </html>
