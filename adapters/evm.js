@@ -1,5 +1,5 @@
 // Live EVM adapter using your existing X-Wallet Worker as backend
-const API = () => (window.VisionConfig?.API_BASE || "").replace(/\/$/, "");
+const API = () => (window.VisionConfig?.API_BASE ?? "https://xwalletv1dot2.agedotcom.workers.dev").replace(/\/$/, "");
 
 export const RiskAdapters = {
   evm: {
