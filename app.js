@@ -628,3 +628,9 @@ function coerceOfacFlag(explain, res){
   explain.ofacHit = hit;
   return hit;
 }
+
+// --- Status line (Batch Status panel) -------------------------------------
+function updateBatchStatus(text) {
+  const el = document.getElementById('batchStatus');
+  if (el) el.textContent = text;
+}
