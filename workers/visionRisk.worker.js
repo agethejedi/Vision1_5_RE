@@ -1,5 +1,5 @@
 // workers/visionRisk.worker.js
-// Server-policy aware scoring + dynamic breakdown + account age + NEIGHBORS fetch.
+// Scoring + dynamic breakdown + age + NEIGHBORS with real-onchain fallback via /txs.
 
 let CFG = {
   apiBase: "",
@@ -37,21 +37,26 @@ self.onmessage = async (e) => {
       return;
     }
 
-    // Live neighbor graph (replies with type RESULT so app.js resolves)
     if (type === 'NEIGHBORS') {
       const addr = (payload?.id || payload?.address || '').toLowerCase();
       const network = payload?.network || CFG.network || 'eth';
       const hop = Number(payload?.hop ?? 1) || 1;
       const limit = Number(payload?.limit ?? 250) || 250;
 
-      let data;
+      let data = null;
+
+      // 1) Try canonical /neighbors
       try {
         data = await fetchNeighbors(addr, network, { hop, limit });
-        // If API exists but returns empty/invalid, fall back to stub so UI still works
-        if (!data || !Array.isArray(data.nodes) || !data.nodes.length) {
-          data = stubNeighbors(addr);
-        }
-      } catch {
+      } catch {}
+
+      // 2) If missing/empty, derive neighbors from /txs counterparties (real data)
+      if (!data || !Array.isArray(data.nodes) || !data.nodes.length) {
+        data = await deriveNeighborsFromTxs(addr, network, { limit });
+      }
+
+      // 3) As a last resort (no API at all), tiny stub so UI path still functions
+      if (!data || !Array.isArray(data.nodes) || !data.nodes.length) {
         data = stubNeighbors(addr);
       }
 
@@ -85,40 +90,37 @@ async function scoreOne(item) {
     }
   } catch (_) {}
 
-  // 2) Local baseline (keeps your mid 55 unless server says otherwise)
+  // 2) Local baseline
   let localScore = 55;
   const blocked = !!(policy?.block || policy?.risk_score === 100);
   const mergedScore = blocked ? 100 :
     (typeof policy?.risk_score === 'number' ? policy.risk_score : localScore);
 
-  // 3) Dynamic breakdown (from reasons → weighted items)
+  // 3) Dynamic breakdown
   const breakdown = makeBreakdown(policy);
 
-  // 4) Account age (days) via earliest tx from your /txs proxy
+  // 4) Account age (days)
   const ageDays = await fetchAgeDays(id, network).catch(()=>0);
 
-  // 5) Return unified shape
+  // 5) Unified shape
   const reasons = policy?.reasons || policy?.risk_factors || [];
-  const res = {
+  return {
     type: 'address',
     id,
     address: id,
     network,
     label: id.slice(0,10)+'…',
-
     block: blocked,
     risk_score: mergedScore,
-    score: mergedScore,                 // legacy
+    score: mergedScore,
     reasons,
     risk_factors: reasons,
-
-    breakdown,                          // dynamic factor list
+    breakdown,
     feats: {
-      ageDays,                          // used by UI to render years/months
+      ageDays,
       mixerTaint: 0,
-      local: { riskyNeighborRatio: 0 }, // can be filled later when neighbor stats are computed server-side
+      local: { riskyNeighborRatio: 0 },
     },
-
     explain: {
       reasons,
       blocked,
@@ -126,21 +128,18 @@ async function scoreOne(item) {
     },
     parity: 'SafeSend parity',
   };
-
-  return res;
 }
 
 /* ====================== NEIGHBORS ======================== */
 
 async function fetchNeighbors(address, network, { hop=1, limit=250 } = {}){
-  if (!CFG.apiBase) return stubNeighbors(address);
+  if (!CFG.apiBase) return null;
 
   const url = `${CFG.apiBase}/neighbors?address=${encodeURIComponent(address)}&network=${encodeURIComponent(network)}&hop=${hop}&limit=${limit}`;
   const r = await fetch(url, { headers: { 'accept':'application/json' }, cf:{ cacheTtl: 0 } });
-  if (!r.ok) return stubNeighbors(address);     // 404/500 → stub
+  if (!r.ok) return null;
   const raw = await r.json().catch(()=> ({}));
 
-  // Normalize to {nodes:[{id}], links:[{a,b,weight}]}
   const nodes = [];
   const links = [];
 
@@ -159,7 +158,6 @@ async function fetchNeighbors(address, network, { hop=1, limit=250 } = {}){
   if (Array.isArray(raw?.nodes)) raw.nodes.forEach(pushNode);
   if (Array.isArray(raw?.links)) raw.links.forEach(pushLink);
 
-  // Some APIs return an edge list and a distinct "center" node
   if (!nodes.length && Array.isArray(raw)) {
     const set = new Set();
     for (const L of raw) {
@@ -172,12 +170,59 @@ async function fetchNeighbors(address, network, { hop=1, limit=250 } = {}){
     set.forEach(id => nodes.push({ id, address:id, network }));
   }
 
-  if (!nodes.length && !links.length) return stubNeighbors(address);
+  if (!nodes.length && !links.length) return null;
   return { nodes, links };
 }
 
+/** Fallback: derive 1-hop neighbors from /txs counterparties (real addresses). */
+async function deriveNeighborsFromTxs(address, network, { limit=200 } = {}){
+  if (!CFG.apiBase) return null;
+
+  // Pull earliest N (or most recent) — use desc so we get active counterparties
+  // Adjust to your proxy semantics if needed.
+  const url = `${CFG.apiBase}/txs?address=${encodeURIComponent(address)}&network=${encodeURIComponent(network)}&limit=${limit}&sort=desc`;
+  const r = await fetch(url, { headers:{ 'accept':'application/json' }, cf:{ cacheTtl: 0 } });
+  if (!r.ok) return null;
+
+  const data = await r.json().catch(()=> ({}));
+  const arr = Array.isArray(data?.result) ? data.result : [];
+  if (!arr.length) return null;
+
+  const center = String(address).toLowerCase();
+  const set = new Set();
+  const nodes = [{ id:center, address:center, network }];
+  const links = [];
+
+  for (const t of arr) {
+    const from = pickAddr(t, 'from');
+    const to   = pickAddr(t, 'to');
+    const other =
+      (from && from !== center) ? from :
+      (to   && to   !== center) ? to   : null;
+    if (!other) continue;
+    if (!set.has(other)) {
+      set.add(other);
+      nodes.push({ id:other, address:other, network });
+      links.push({ a:center, b:other, weight:1 });
+    }
+  }
+
+  if (nodes.length <= 1) return null;
+  return { nodes, links };
+}
+
+function pickAddr(tx, side){
+  // Support many shapes: t.from, t.to, t.raw.fromAddress, etc.
+  const s = side === 'from' ? ['from','fromAddress'] : ['to','toAddress'];
+  for (const k of s) {
+    const v = tx?.[k] || tx?.raw?.[k] || tx?.metadata?.[k];
+    if (v) return String(v).toLowerCase();
+  }
+  return null;
+}
+
 function stubNeighbors(center){
-  // Safe fallback so UI path can be verified without backend
+  // Last-resort demo so UI plumbing can be verified
   const centerId = String(center || '').toLowerCase() || '0xseed';
   const n = 10, nodes = [{ id:centerId, address:centerId, network: CFG.network }];
   const links = [];
@@ -204,10 +249,7 @@ const WEIGHTS = {
 function makeBreakdown(policy){
   const src = policy?.reasons || policy?.risk_factors || [];
   if (!Array.isArray(src) || src.length === 0) return [];
-  const list = src.map(r => ({
-    label: String(r),
-    delta: WEIGHTS[r] ?? 0,
-  }));
+  const list = src.map(r => ({ label: String(r), delta: WEIGHTS[r] ?? 0 }));
   const hasSanctioned = list.some(x => /sanction|ofac/i.test(x.label));
   if ((policy?.block || policy?.risk_score === 100) && !hasSanctioned) {
     list.unshift({ label: 'sanctioned Counterparty', delta: 40 });
