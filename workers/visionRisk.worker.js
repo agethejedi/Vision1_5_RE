@@ -1,6 +1,5 @@
-// workers/visionRisk.worker.js
-// Scoring + dynamic breakdown + age + NEIGHBORS with real-onchain fallback via /txs
-// and computed neighbor statistics returned alongside the graph.
+// workers/visionRisk.worker.js — Vision 1_4_2
+// Instrumented neighbors + NEIGHBOR_STATS + TTL cache + batched scoring
 
 let CFG = {
   apiBase: "",
@@ -8,6 +7,10 @@ let CFG = {
   concurrency: 8,
   flags: { graphSignals: true, streamBatch: true, neighborStats: true },
 };
+
+const TTL_MS = 10 * 60 * 1000; // 10 min
+const neighborCache = new Map(); // key `${net}:${addr}:limit` -> { ts, payload }
+const scoreCache = new Map();    // key `${net}:${addr}` -> last result (for stats)
 
 self.onmessage = async (e) => {
   const { id, type, payload } = e.data || {};
@@ -39,30 +42,69 @@ self.onmessage = async (e) => {
     }
 
     if (type === 'NEIGHBORS') {
-      const addr = (payload?.id || payload?.address || '').toLowerCase();
+      const addr = normalizeAddr(payload?.id || payload?.address);
       const network = payload?.network || CFG.network || 'eth';
       const hop = Number(payload?.hop ?? 1) || 1;
-      const limit = Number(payload?.limit ?? 250) || 250;
+      const reqLimit = Number(payload?.limit ?? 250) || 250;
+      const cap = Number(payload?.cap ?? 120) || 120;
 
-      let graph = null;
-
-      // 1) Try canonical /neighbors
-      try { graph = await fetchNeighbors(addr, network, { hop, limit }); } catch {}
-
-      // 2) Fallback to /txs derived neighbors (real addresses)
-      if (!graph || !Array.isArray(graph.nodes) || !graph.nodes.length) {
-        graph = await deriveNeighborsFromTxs(addr, network, { limit });
+      // 1) cached?
+      const cacheKey = `${network}:${addr}:${reqLimit}`;
+      const cached = neighborCache.get(cacheKey);
+      if (cached && (Date.now() - cached.ts) < TTL_MS) {
+        post({ type:'RESULT', id, data: cached.payload.graph });        // nodes/links for UI
+        post({ type:'NEIGHBOR_STATS', data: { ...cached.payload.stats, source:'cache' }});
+        return;
       }
 
-      // 3) Last resort stub so UI stays functional
-      if (!graph || !Array.isArray(graph.nodes) || !graph.nodes.length) {
-        graph = stubNeighbors(addr);
+      // 2) fetch (instrument timings)
+      const t0 = Date.now();
+      const fetch1 = await fetchNeighbors(addr, network, { hop, limit: reqLimit }).catch(() => null);
+      const msFetch = Date.now() - t0;
+
+      let graph = fetch1 || { nodes:[], links:[] };
+      let totalNeighbors = (graph.nodes?.length || 0) - 1;
+
+      // Guard against partial graphs (<5). Retry ONCE.
+      let retried = false;
+      if (totalNeighbors < 5) {
+        retried = true;
+        const t1 = Date.now();
+        const fetch2 = await fetchNeighbors(addr, network, { hop, limit: Math.max(50, reqLimit) }).catch(() => null);
+        graph = fetch2 || graph;
+        totalNeighbors = (graph.nodes?.length || 0) - 1;
+        graph._msRetry = Date.now() - t1;
       }
 
-      // 4) Compute lightweight neighbor stats (sampled) and attach
-      const stats = await computeNeighborStats(addr, network, graph.nodes);
+      // Deterministic cap
+      const limited = limitGraph(graph, cap);
+      const overflow = Math.max(0, totalNeighbors - (limited.nodes.length - 1));
 
-      post({ id, type: 'RESULT', data: { ...graph, stats } });
+      // 3) send graph to UI
+      post({ type:'RESULT', id, data: limited });
+
+      // 4) score neighbors in batches (25 w/ 75ms gap) and compute stats
+      const neighborIds = limited.nodes.map(n => n.id).filter(id2 => id2 !== addr);
+      const stats = await scoreNeighborsAndSummarize(addr, network, neighborIds, {
+        batchSize: 25, gapMs: 75
+      });
+
+      const sparseNeighborhood = totalNeighbors < 5;
+      const outStats = {
+        id: addr, network,
+        n: neighborIds.length, totalNeighbors, overflow,
+        avgDays: stats.avgDays, avgTx: stats.avgTx,
+        inactiveRatio: stats.inactiveRatio,
+        sparseNeighborhood,
+        timings: { msFetch, msScore: stats.msScore || 0, msRetry: graph._msRetry || 0 },
+        source: 'network'
+      };
+
+      // cache both graph + stats
+      neighborCache.set(cacheKey, { ts: Date.now(), payload: { graph: limited, stats: outStats } });
+
+      // 5) emit stats
+      post({ type:'NEIGHBOR_STATS', data: outStats });
       return;
     }
 
@@ -73,15 +115,17 @@ self.onmessage = async (e) => {
 };
 
 function post(msg){ self.postMessage(msg); }
+function normalizeAddr(x){ return String(x||'').toLowerCase(); }
 
 /* ====================== SCORE CORE ======================= */
 
 async function scoreOne(item) {
   const idRaw = item?.id || item?.address || '';
-  const id = String(idRaw).toLowerCase();
+  const id = normalizeAddr(idRaw);
   const network = item?.network || CFG.network || 'eth';
   if (!id) throw new Error('scoreOne: missing id');
 
+  // 1) Policy / list check
   let policy = null;
   try {
     if (CFG.apiBase) {
@@ -91,53 +135,77 @@ async function scoreOne(item) {
     }
   } catch (_) {}
 
+  // 2) Local baseline
   let localScore = 55;
   const blocked = !!(policy?.block || policy?.risk_score === 100);
   const mergedScore = blocked ? 100 :
     (typeof policy?.risk_score === 'number' ? policy.risk_score : localScore);
 
+  // 3) Dynamic breakdown
   const breakdown = makeBreakdown(policy);
+
+  // 4) Account age (days)
   const ageDays = await fetchAgeDays(id, network).catch(()=>0);
 
+  // 5) Build result
   const reasons = policy?.reasons || policy?.risk_factors || [];
-  return {
+  const res = {
     type: 'address',
     id,
     address: id,
     network,
     label: id.slice(0,10)+'…',
+
     block: blocked,
     risk_score: mergedScore,
     score: mergedScore,
     reasons,
     risk_factors: reasons,
+
     breakdown,
-    feats: { ageDays, mixerTaint: 0, local: { riskyNeighborRatio: 0 } },
-    explain: { reasons, blocked, ofacHit: coerceOfacFromPolicy(policy, reasons) },
+    feats: {
+      ageDays,
+      mixerTaint: 0,
+      local: { riskyNeighborRatio: 0 },
+    },
+
+    explain: {
+      reasons,
+      blocked,
+      ofacHit: coerceOfacFromPolicy(policy, reasons),
+      txCount: null, // placeholder for future backend enrichment
+    },
     parity: 'SafeSend parity',
   };
+
+  // cache for stats aggregation
+  scoreCache.set(`${network}:${id}`, res);
+  return res;
 }
 
-/* ====================== NEIGHBORS (graph) ======================== */
+/* ====================== NEIGHBORS ======================== */
 
 async function fetchNeighbors(address, network, { hop=1, limit=250 } = {}){
-  if (!CFG.apiBase) return null;
+  if (!CFG.apiBase) return stubNeighbors(address);
+
   const url = `${CFG.apiBase}/neighbors?address=${encodeURIComponent(address)}&network=${encodeURIComponent(network)}&hop=${hop}&limit=${limit}`;
   const r = await fetch(url, { headers: { 'accept':'application/json' }, cf:{ cacheTtl: 0 } });
-  if (!r.ok) return null;
+  if (!r.ok) return stubNeighbors(address);
   const raw = await r.json().catch(()=> ({}));
 
-  const nodes = [], links = [];
+  const nodes = [];
+  const links = [];
+
   const pushNode = (n) => {
-    const id = String(n?.id || n?.address || n?.addr || '').toLowerCase();
+    const id = normalizeAddr(n?.id || n?.address || n?.addr || '');
     if (!id) return;
     nodes.push({ id, address:id, network, ...n });
   };
   const pushLink = (L) => {
-    const a = String(L?.a ?? L?.source ?? L?.idA ?? L?.from ?? '').toLowerCase();
-    const b = String(L?.b ?? L?.target ?? L?.idB ?? L?.to   ?? '').toLowerCase();
+    const a = normalizeAddr(L?.a ?? L?.source ?? L?.idA ?? L?.from ?? '');
+    const b = normalizeAddr(L?.b ?? L?.target ?? L?.idB ?? L?.to   ?? '');
     if (!a || !b || a === b) return;
-    links.push({ a, b, weight: Number(L?.weight ?? 1) || 1 });
+    links.push({ a, b, weight: Number(L?.weight ?? L?.amount ?? 1) || 1 });
   };
 
   if (Array.isArray(raw?.nodes)) raw.nodes.forEach(pushNode);
@@ -146,8 +214,8 @@ async function fetchNeighbors(address, network, { hop=1, limit=250 } = {}){
   if (!nodes.length && Array.isArray(raw)) {
     const set = new Set();
     for (const L of raw) {
-      const a = String(L?.a ?? L?.source ?? L?.from ?? L?.idA ?? '').toLowerCase();
-      const b = String(L?.b ?? L?.target ?? L?.to   ?? L?.idB ?? '').toLowerCase();
+      const a = normalizeAddr(L?.a ?? L?.source ?? L?.from ?? L?.idA ?? '');
+      const b = normalizeAddr(L?.b ?? L?.target ?? L?.to   ?? L?.idB ?? '');
       if (a) set.add(a);
       if (b) set.add(b);
       pushLink(L);
@@ -155,129 +223,100 @@ async function fetchNeighbors(address, network, { hop=1, limit=250 } = {}){
     set.forEach(id => nodes.push({ id, address:id, network }));
   }
 
-  if (!nodes.length && !links.length) return null;
+  if (!nodes.length && !links.length) return stubNeighbors(address, network);
   return { nodes, links };
 }
 
-/** Fallback: derive 1-hop neighbors from /txs counterparties (real addresses). */
-async function deriveNeighborsFromTxs(address, network, { limit=200 } = {}){
-  if (!CFG.apiBase) return null;
-  const url = `${CFG.apiBase}/txs?address=${encodeURIComponent(address)}&network=${encodeURIComponent(network)}&limit=${limit}&sort=desc`;
-  const r = await fetch(url, { headers:{ 'accept':'application/json' }, cf:{ cacheTtl: 0 } });
-  if (!r.ok) return null;
-
-  const data = await r.json().catch(()=> ({}));
-  const arr = Array.isArray(data?.result) ? data.result : [];
-  if (!arr.length) return null;
-
-  const center = String(address).toLowerCase();
-  const set = new Set();
-  const nodes = [{ id:center, address:center, network }];
+function stubNeighbors(center, network = CFG.network){
+  const centerId = normalizeAddr(center || '0xseed');
+  const n = 10, nodes = [{ id:centerId, address:centerId, network }];
   const links = [];
-
-  for (const t of arr) {
-    const from = pickAddr(t, 'from');
-    const to   = pickAddr(t, 'to');
-    const other =
-      (from && from !== center) ? from :
-      (to   && to   !== center) ? to   : null;
-    if (!other) continue;
-    if (!set.has(other)) {
-      set.add(other);
-      nodes.push({ id:other, address:other, network });
-      links.push({ a:center, b:other, weight:1 });
-    }
+  for (let i=0;i<n;i++){
+    const id = `0x${Math.random().toString(16).slice(2).padStart(40,'0').slice(0,40)}`;
+    nodes.push({ id, address:id, network });
+    links.push({ a:centerId, b:id, weight:1 });
   }
-
-  if (nodes.length <= 1) return null;
   return { nodes, links };
 }
 
-/* ====================== NEIGHBOR STATS ===========================
-   Computes:
-   - neighborsDormant.inactiveRatio  (age > 365d AND lastTx > 180d)
-   - neighborsAvgAge.avgDays         (mean of neighbor ages)
-   - neighborsAvgTxCount.avgTx       (mean of sampled neighbor tx counts)
-   Sampling limits protect APIs.
-=================================================================== */
+function limitGraph(graph, cap){
+  const center = graph.nodes[0]?.id;
+  const nodes = [];
+  const links = [];
+  const keep = new Set();
 
-async function computeNeighborStats(center, network, nodes){
-  try {
-    // exclude center
-    const neighIds = (nodes || []).map(n => String(n.id || n.address).toLowerCase())
-      .filter(id => id && id !== String(center).toLowerCase());
+  // Keep center always
+  if (center) { keep.add(center); nodes.push(graph.nodes.find(n => n.id === center)); }
 
-    if (!neighIds.length) return null;
+  // Deterministically keep first `cap` neighbors in input order
+  for (const n of graph.nodes) {
+    if (n.id === center) continue;
+    if (nodes.length - 1 >= cap) break;
+    keep.add(n.id);
+    nodes.push(n);
+  }
 
-    const SAMPLE_N = Math.min(40, neighIds.length);     // cap
-    const TX_SAMPLE_LIMIT = 50;                          // per neighbor
-    const now = Date.now();
-    const DAY = 86400000;
-    const pick = neighIds.slice(0, SAMPLE_N);
+  for (const L of graph.links) {
+    if (keep.has(L.a) && keep.has(L.b)) links.push(L);
+  }
+  return { nodes, links };
+}
 
-    // Limit concurrency
-    const chunks = chunk(pick, Math.max(2, Math.min(8, CFG.concurrency || 6)));
-    const results = [];
-    for (const group of chunks) {
-      const batch = group.map(async id => {
-        const ageDays = await fetchAgeDays(id, network).catch(()=>0);
+/* ========== Batch scoring neighbors + stats aggregation ========== */
 
-        // recent activity: look at most-recent tx timestamp
-        let lastTxDays = Infinity;
-        try {
-          const url = `${CFG.apiBase}/txs?address=${encodeURIComponent(id)}&network=${encodeURIComponent(network)}&limit=1&sort=desc`;
-          const r = await fetch(url, { headers:{ 'accept':'application/json' }, cf:{ cacheTtl: 0 } });
-          if (r.ok) {
-            const data = await r.json().catch(()=> ({}));
-            const arr = Array.isArray(data?.result) ? data.result : [];
-            if (arr.length) {
-              const t = arr[0];
-              const ts = extractMs(t);
-              if (ts) lastTxDays = (now - ts) / DAY;
-            }
-          }
-        } catch {}
+async function scoreNeighborsAndSummarize(centerId, network, neighborIds, { batchSize=25, gapMs=75 }={}){
+  const key = (id)=> `${network}:${id}`;
 
-        // coarse tx count proxy (up to TX_SAMPLE_LIMIT)
-        let txCount = 0;
-        try {
-          const url = `${CFG.apiBase}/txs?address=${encodeURIComponent(id)}&network=${encodeURIComponent(network)}&limit=${TX_SAMPLE_LIMIT}&sort=desc`;
-          const r = await fetch(url, { headers:{ 'accept':'application/json' }, cf:{ cacheTtl: 0 } });
-          if (r.ok) {
-            const data = await r.json().catch(()=> ({}));
-            const arr = Array.isArray(data?.result) ? data.result : [];
-            txCount = arr.length; // lower bound / sample count
-          }
-        } catch {}
+  const todo = [];
+  for (const id of neighborIds) {
+    if (!scoreCache.has(key(id))) {
+      todo.push({ type:'address', id, network });
+    }
+  }
 
-        return { id, ageDays, lastTxDays, txCount };
-      });
+  const t0 = Date.now();
+  for (let i=0; i<todo.length; i += batchSize){
+    const batch = todo.slice(i, i+batchSize);
 
-      results.push(...(await Promise.all(batch)));
+    // Execute batch sequentially to respect rate limits
+    for (const it of batch) {
+      try {
+        const r = await scoreOne(it);
+        // stream neighbors too? optional; we skip to avoid UI spam
+        // post({ type:'RESULT_STREAM', data:r });
+      } catch (_) {}
     }
 
-    // Aggregate
-    const n = results.length || 1;
-    const avgAge = results.reduce((s,r)=>s+(r.ageDays||0),0)/n;
-    const avgTx  = results.reduce((s,r)=>s+(r.txCount||0),0)/n;
-
-    // Dormant definition: old AND inactive
-    const dormant = results.filter(r => (r.ageDays||0) > 365 && (r.lastTxDays||Infinity) > 180).length;
-    const inactiveRatio = dormant / n;
-    const avgInactiveAge = (() => {
-      const arr = results.filter(r => (r.ageDays||0) > 365 && (r.lastTxDays||Infinity) > 180).map(r=>r.ageDays||0);
-      if (!arr.length) return null;
-      return Math.round(arr.reduce((a,b)=>a+b,0)/arr.length);
-    })();
-
-    return {
-      neighborsDormant: { inactiveRatio, avgInactiveAge, resurrected: 0, whitelistPct: 0, n },
-      neighborsAvgTxCount: { avgTx, n },
-      neighborsAvgAge: { avgDays: avgAge, n }
-    };
-  } catch {
-    return null;
+    // light backpressure
+    if (i + batchSize < todo.length) {
+      await sleep(gapMs);
+    }
   }
+  const msScore = Date.now() - t0;
+
+  // Aggregate stats from cache
+  let n = neighborIds.length;
+  if (!n) return { n:0, avgDays:null, avgTx:null, inactiveRatio:0, msScore };
+
+  let haveAge=0, sumAge=0;
+  let haveTx=0, sumTx=0;
+  let inactive=0;
+
+  for (const id of neighborIds) {
+    const s = scoreCache.get(key(id));
+    const age = s?.feats?.ageDays;
+    const tx  = s?.explain?.txCount ?? s?.txCount;
+    if (typeof age === 'number') { sumAge += age; haveAge++; }
+    if (typeof tx  === 'number') { sumTx  += tx;  haveTx++; }
+    const isDormant = (typeof age === 'number' && age > 365) && !(tx > 0);
+    if (isDormant) inactive++;
+  }
+
+  const avgDays = haveAge ? Math.round(sumAge / haveAge) : null;
+  const avgTx   = haveTx ? (sumTx / haveTx) : null;
+  const inactiveRatio = n ? (inactive / n) : 0;
+
+  return { n, avgDays, avgTx, inactiveRatio, msScore };
 }
 
 /* ====================== HELPERS ======================== */
@@ -312,14 +351,7 @@ async function fetchAgeDays(address, network){
   const arr  = Array.isArray(data?.result) ? data.result : [];
   if (arr.length === 0) return 0;
 
-  const ts = extractMs(arr[0]);
-  if (!ts) return 0;
-
-  const days = (Date.now() - ts) / 86400000;
-  return days > 0 ? Math.round(days) : 0;
-}
-
-function extractMs(t){
+  const t = arr[0];
   const iso = t?.raw?.metadata?.blockTimestamp || t?.metadata?.blockTimestamp;
   const sec = t?.timeStamp || t?.timestamp || t?.blockTime;
   let ms = 0;
@@ -328,7 +360,10 @@ function extractMs(t){
     const n = Number(sec);
     if (!isNaN(n) && n > 1000000000) ms = (n < 2000000000 ? n*1000 : n);
   }
-  return ms || 0;
+  if (!ms) return 0;
+
+  const days = (Date.now() - ms) / 86400000;
+  return days > 0 ? Math.round(days) : 0;
 }
 
 function coerceOfacFromPolicy(policy, reasons){
@@ -336,29 +371,4 @@ function coerceOfacFromPolicy(policy, reasons){
   return !!(policy?.block || policy?.risk_score === 100 || /ofac|sanction/.test(txt));
 }
 
-function pickAddr(tx, side){
-  const s = side === 'from' ? ['from','fromAddress'] : ['to','toAddress'];
-  for (const k of s) {
-    const v = tx?.[k] || tx?.raw?.[k] || tx?.metadata?.[k];
-    if (v) return String(v).toLowerCase();
-  }
-  return null;
-}
-
-function chunk(arr, size){
-  const out = [];
-  for (let i=0;i<arr.length;i+=size) out.push(arr.slice(i, i+size));
-  return out;
-}
-
-function stubNeighbors(center){
-  const centerId = String(center || '').toLowerCase() || '0xseed';
-  const n = 10, nodes = [{ id:centerId, address:centerId, network: CFG.network }];
-  const links = [];
-  for (let i=0;i<n;i++){
-    const id = `0x${Math.random().toString(16).slice(2).padStart(40,'0').slice(0,40)}`;
-    nodes.push({ id, address:id, network: CFG.network });
-    links.push({ a:centerId, b:id, weight:1 });
-  }
-  return { nodes, links };
-}
+function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
