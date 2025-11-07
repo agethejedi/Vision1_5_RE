@@ -6,7 +6,6 @@
   <title>RiskXLabs — Vision</title>
   <link rel="icon" href="./assets/favicon.png" type="image/png"/>
   <link rel="stylesheet" href="./styles.css"/>
-  <!-- Config (sets window.VisionConfig.API_BASE, etc.) -->
   <script type="module" src="./config.js"></script>
 </head>
 <body>
@@ -30,7 +29,7 @@
       <div class="panel">
         <h3 class="panel-title">Graph</h3>
 
-        <!-- IMPORTANT: the SVG renderer writes inside this div -->
+        <!-- Graph canvas + controls/status get injected inside -->
         <div id="graph" class="graph-canvas" aria-label="Network graph"></div>
 
         <div class="panel-row">
@@ -39,13 +38,13 @@
           <button id="clearBtn" class="btn btn-ghost">Clear</button>
         </div>
       </div>
+      <!-- Tooltip host -->
+      <div id="rxlTooltip" style="position:fixed;display:none;background:#0c1820;border:1px solid #1a2a33;border-radius:8px;padding:8px 10px;font-size:12px;z-index:10;pointer-events:none;"></div>
     </section>
 
     <section class="right">
       <div class="panel">
         <h3 class="panel-title">Details</h3>
-
-        <!-- Score panel container used by ScoreMeter('#scorePanel') -->
         <div id="scorePanel" class="score-panel">
           <div class="meter">
             <svg viewBox="0 0 100 100" class="ring">
@@ -59,49 +58,30 @@
           </div>
           <div class="reasons"></div>
         </div>
-
         <div id="entityMeta" class="meta"></div>
       </div>
 
-      <!-- ===================== NEW: Narrative Summary panel ===================== -->
-      <div class="panel" id="narrativePanel" hidden>
+      <div id="narrativePanel" class="panel">
         <h3 class="panel-title">Narrative Summary</h3>
-
-        <!-- Mode + actions -->
-        <div class="panel-row" style="gap:8px; align-items:center;">
-          <label for="rxlMode" class="muted" style="min-width:90px;">Mode</label>
+        <div class="panel-row" style="gap:8px;align-items:center;">
+          <label class="muted">Mode</label>
           <select id="rxlMode" class="select">
             <option value="analyst" selected>Analyst</option>
             <option value="consumer">Consumer</option>
           </select>
-          <div style="margin-left:auto; display:flex; gap:8px;">
-            <button id="rxlCopy" class="btn btn-ghost">Copy</button>
-            <button id="rxlExport" class="btn btn-ghost">Export PDF</button>
-          </div>
+          <button id="rxlCopy" class="btn btn-ghost">Copy</button>
+          <button id="rxlExport" class="btn btn-ghost">Export PDF</button>
         </div>
-
-        <!-- Narrative text -->
-        <p id="rxlNarrativeText" class="meta"></p>
-
-        <!-- Badges -->
-        <div id="rxlBadges" class="badge-row" aria-label="Risk badges"></div>
-
-        <!-- Factor table -->
-        <div class="table-wrap" style="margin-top:8px;">
-          <table id="rxlFactors" class="table">
-            <thead>
-              <tr>
-                <th>Factor</th>
-                <th>Metric(s)</th>
-                <th style="text-align:right;">Impact</th>
-                <th>Source</th>
-              </tr>
-            </thead>
-            <tbody><!-- rows injected by app.js --></tbody>
-          </table>
-        </div>
+        <div id="rxlBadges" style="margin:6px 0"></div>
+        <div id="rxlNarrativeText" class="meta" style="margin:6px 0"></div>
+        <div class="divider"></div>
+        <table id="rxlFactors" style="width:100%;font-size:12px;">
+          <thead class="muted">
+            <tr><th style="text-align:left;">Factor</th><th style="text-align:left;">Metric(s)</th><th style="text-align:right;">Impact</th><th style="text-align:left;">Source</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
       </div>
-      <!-- =================== /NEW: Narrative Summary panel ====================== -->
 
       <div class="panel">
         <h3 class="panel-title">Batch Status</h3>
@@ -114,7 +94,6 @@
     <span>© RiskXLabs — We Fight Fraud</span>
   </footer>
 
-  <!-- Only load the app entry; it imports the other modules. Avoid double-loading to keep CSP happy. -->
   <script type="module" src="./app.js"></script>
 </body>
 </html>
