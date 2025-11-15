@@ -1,1 +1,30 @@
-
+{
+  "last_updated": "2025-11-15",
+  "source": "U.S. Treasury OFAC SDN List + EU Sanctions mirror",
+  "entries": [
+    {
+      "address": "0x1356C5CDb6b3cC46Bf0bA5D1b6E3fAaF8aFd24F9",
+      "network": "ethereum",
+      "risk_score": 100,
+      "entity": "Blender.io (Mixer)",
+      "tags": ["OFAC", "sanctioned", "mixer"],
+      "notes": "OFAC-designated mixer service (SDN 2022-05-06)."
+    },
+    {
+      "address": "0x85A33e8e1fFdf3B8902BcfE7B18B8E31eE6F1C5B",
+      "network": "ethereum",
+      "risk_score": 100,
+      "entity": "Tornado Cash",
+      "tags": ["OFAC", "sanctioned", "mixer"],
+      "notes": "OFAC-designated Tornado Cash pool address (SDN 2022-08-08)."
+    },
+    {
+      "address": "bc1qzq9p0x5f8hq8x7v6l3fx8g4s4vy5a3x9eqw6kq",
+      "network": "bitcoin",
+      "risk_score": 100,
+      "entity": "Lazarus Group",
+      "tags": ["OFAC", "state_actor"],
+      "notes": "North Korea-linked entity; added 2023-04-20."
+    }
+  ]
+}
