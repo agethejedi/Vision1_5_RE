@@ -1,1 +1,54 @@
-
+{
+  "last_updated": "2025-11-15",
+  "source": "RiskXLabs internal + public exchange disclosures",
+  "custodians": [
+    {
+      "name": "Binance Hot Wallet",
+      "category": "CEX",
+      "networks": ["ethereum", "bnb"],
+      "risk_level": "low",
+      "addresses": [
+        "0x3f5CE5FBFe3E9af3971dD833D26BA9b5C936f0bE",
+        "0x28C6c06298d514Db089934071355E5743bf21d60"
+      ]
+    },
+    {
+      "name": "Coinbase Custody",
+      "category": "CEX",
+      "networks": ["ethereum", "bitcoin"],
+      "risk_level": "low",
+      "addresses": [
+        "0x503828976D22510aad0201ac7EC88293211D23Da",
+        "bc1q4zyp0rps7lf9l3z07h4z3nj0z6ykm42v4syf8t"
+      ]
+    },
+    {
+      "name": "Kraken",
+      "category": "CEX",
+      "networks": ["ethereum"],
+      "risk_level": "low",
+      "addresses": [
+        "0x2910543Af39aba0Cd09dBb2D50200b3E800A63D2"
+      ]
+    },
+    {
+      "name": "Tokenlon",
+      "category": "DEX Aggregator",
+      "networks": ["ethereum"],
+      "risk_level": "watch",
+      "addresses": [
+        "0xB1dC9124c395c1e97773ab855d66E879f053A289"
+      ],
+      "notes": "Often used by scam operations; monitor for suspicious flows."
+    },
+    {
+      "name": "Fireblocks Custody",
+      "category": "Custodian Service",
+      "networks": ["ethereum", "polygon"],
+      "risk_level": "low",
+      "addresses": [
+        "0x0F2D719407FdBeFF09D87557AbB7232601FD9F29"
+      ]
+    }
+  ]
+}
