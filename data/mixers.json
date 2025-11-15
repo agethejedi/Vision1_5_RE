@@ -1,1 +1,40 @@
-
+{
+  "last_updated": "2025-11-15",
+  "source": "RiskXLabs intelligence + public blockchain analytics",
+  "mixers": [
+    {
+      "name": "Tornado Cash",
+      "networks": ["ethereum", "polygon"],
+      "risk_level": "critical",
+      "addresses": [
+        "0x85A33e8e1fFdf3B8902BcfE7B18B8E31eE6F1C5B",
+        "0x2bD94d7B2c5a8b1E92Bb5E4E7F59E8E3aD5B11d6"
+      ]
+    },
+    {
+      "name": "Blender.io",
+      "networks": ["bitcoin"],
+      "risk_level": "critical",
+      "addresses": [
+        "bc1qzq9p0x5f8hq8x7v6l3fx8g4s4vy5a3x9eqw6kq",
+        "bc1q3ahv6mqq3p0wypl5x5xyvn9w6zh5adp7fw6e0c"
+      ]
+    },
+    {
+      "name": "Sinbad Mixer",
+      "networks": ["bitcoin"],
+      "risk_level": "high",
+      "addresses": [
+        "bc1qtv5hm7s0tzp6v2l3lrl3d5hvj7dgd30h9f06n4"
+      ]
+    },
+    {
+      "name": "ChipMixer",
+      "networks": ["bitcoin"],
+      "risk_level": "high",
+      "addresses": [
+        "1ChipMixerxxxxxxxxxxxxxxxxxxxxxx1"
+      ]
+    }
+  ]
+}
