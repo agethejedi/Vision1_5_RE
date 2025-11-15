@@ -1,1 +1,76 @@
+{
+  "version": "safesend-2025.11.0",
+  "notes": "Balanced Rule-Based + Gov ensemble v1.0 for Vision 1_5_RE",
+  "score": {
+    "min": 0,
+    "max": 100,
+    "block_threshold": 90,
+    "warn_threshold": 65,
+    "confidence_floor": 0.35
+  },
+  "decay": {
+    "reports_months_half_life": 12,
+    "counterparty_months_half_life": 9
+  },
+  "weights": {
+    "ofac_direct": 100,
+    "ofac_one_hop": 30,
+    "ofac_two_hop": 15,
 
+    "mixer_direct": 35,
+    "mixer_one_hop": 20,
+    "mixer_two_hop": 10,
+
+    "young_wallet_lt_30d": 15,
+    "young_wallet_30_90d": 10,
+    "young_wallet_90_180d": 6,
+
+    "neighbors_inactive_ratio_per_0_1": 2,
+    "neighbors_avg_tx_high": 10,
+    "neighbors_avg_age_low": 6,
+
+    "fan_in_high": 9,
+    "fan_out_burst": 6,
+
+    "platform_elevated": 10,
+    "platform_neutral": 5,
+
+    "custodian_dampener": -15,
+    "good_counterparty_dampener": -10,
+
+    "chainabuse_reports_1_2": 5,
+    "chainabuse_reports_ge_3": 10,
+    "chainabuse_category_bump": 5
+  },
+  "thresholds": {
+    "neighbors_inactive_ratio_high": 0.6,
+    "neighbors_avg_tx_high": 200,
+    "neighbors_avg_age_low_days": 45
+  },
+  "bands": {
+    "very_high": [90, 100],
+    "high": [80, 89],
+    "elevated": [60, 79],
+    "moderate": [40, 59],
+    "low": [0, 39]
+  },
+  "platform_risk": {
+    "elevated": 10,
+    "neutral": 5,
+    "watch": 0
+  },
+  "custodian": {
+    "dampener": -15,
+    "explain_label": "Custodian (reduced risk)"
+  },
+  "narrative": {
+    "include_sparse_neighborhood_note": true,
+    "sparse_neighbor_threshold": 5,
+    "badges": {
+      "ofac": { "level": "risk", "label": "OFAC" },
+      "mixer": { "level": "warn", "label": "Mixer Proximity" },
+      "custodian": { "level": "safe", "label": "Custodian" },
+      "platform": { "level": "warn", "label": "Platform" }
+    }
+  }
+}
