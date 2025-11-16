@@ -107,3 +107,52 @@
   padding: 10px; color: var(--muted); text-align: center;
   border-top: 1px solid var(--border);
 }
+/* === Score meter layout fix (Vision 1_5_RE) ===================== */
+
+.score-panel {
+  position: relative;
+}
+
+.score-panel .meter {
+  position: relative;
+  width: 220px;
+  height: 220px;
+  margin: 0 auto 8px;
+}
+
+.score-panel .ring {
+  position: absolute;
+  inset: 0;
+  transform: rotate(-90deg);
+}
+
+.score-panel .track {
+  stroke: rgba(255, 255, 255, 0.08);
+}
+
+.score-panel .arc {
+  stroke: var(--ring-color, #10b981);
+}
+
+.score-meter.blocked .arc {
+  stroke: #ef4444;
+}
+
+.score-panel .label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.score-panel .score-text {
+  font-size: 32px;
+  font-weight: 800;
+}
+
+.score-panel .score-sub {
+  font-size: 12px;
+  opacity: 0.75;
+}
