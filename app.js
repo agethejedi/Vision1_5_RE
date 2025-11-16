@@ -369,14 +369,17 @@ function isBlockedVisual(res){
   return !!(res.block || res.blocked || res.risk_score === 100 ||
             res.sanctionHits || res.explain?.ofacHit || res.ofac === true);
 }
-function colorForScore(score, blocked){
-  if (blocked) return '#ef4444';
-  if (score >= 80) return '#ff3b3b';
-  if (score >= 60) return '#ffb020';
-  if (score >= 40) return '#ffc857';
-  if (score >= 20) return '#22d37b';
-  return '#00eec3';
+// High > 65 (red), Medium 35–65 (yellow), Low < 35 (green)
+function colorForScore(score, blocked) {
+  const s = Number(score || 0);
+
+  if (blocked) return '#ef4444';        // blocked / OFAC hard red
+
+  if (s > 65)  return '#ef4444';        // high risk — red
+  if (s >= 35) return '#eab308';        // medium risk — yellow
+  return '#22c55e';                     // low risk — green
 }
+
 function applyVisualCohesion(res){
   lastRenderResult = res;
   const blocked = isBlockedVisual(res);
