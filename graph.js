@@ -1,231 +1,344 @@
-// graph.js — Vision graph renderer (safe syntax)
-// Radial layout + zoom/pan + fit/reset + select/hover events + halos + label toggle.
+// graph.js — Vision 1_5_RE
+// Radial wallet graph with focused-node hexagon + pulse halo.
+// Exposes window.graph: { setData, getData, on, setHalo, centerOn, zoomFit }
+
+const NS = 'http://www.w3.org/2000/svg';
 
 (function () {
-  const api = {};
-  const listeners = {};
-  function on(evt, fn) { (listeners[evt] || (listeners[evt] = [])).push(fn); return api; }
-  function emit(evt, payload) { (listeners[evt] || []).forEach(fn => { try { fn(payload); } catch (e) {} }); }
-  api.on = on;
+  const state = {
+    nodes: [],
+    links: [],
+    halos: {},        // id -> { color, blocked, intensity }
+    focusedId: null,
+    listeners: {},    // event -> [fn]
+  };
 
-  const host = document.getElementById('graph');
-  const svgNS = 'http://www.w3.org/2000/svg';
-  const svg = document.createElementNS(svgNS, 'svg');
-  svg.setAttribute('class', 'vision-graph');
-  svg.setAttribute('width', '100%');
-  svg.setAttribute('height', '100%');
-  host.appendChild(svg);
+  let container = null;
+  let svg = null;
+  let edgesLayer = null;
+  let nodesLayer = null;
 
-  const gRoot = document.createElementNS(svgNS, 'g'); svg.appendChild(gRoot);
-  const gEdges = document.createElementNS(svgNS, 'g'); gRoot.appendChild(gEdges);
-  const gNodes = document.createElementNS(svgNS, 'g'); gRoot.appendChild(gNodes);
+  /* ========= event bus ========= */
 
-  var data = { nodes: [], links: [] };
-  var halos = new Map();
-  var showLabels = true;
-
-  /* ---------- Zoom / Pan ---------- */
-  var scale = 1, tx = 0, ty = 0;
-  var dragging = false, lastX = 0, lastY = 0;
-
-  function applyTransform() {
-    gRoot.setAttribute('transform', 'translate(' + tx + ',' + ty + ') scale(' + scale + ')');
+  function on(event, fn) {
+    if (!state.listeners[event]) state.listeners[event] = [];
+    state.listeners[event].push(fn);
   }
 
-  host.addEventListener('wheel', function (e) {
-    e.preventDefault();
-    var rect = svg.getBoundingClientRect();
-    var cx = (e.clientX - rect.left - tx) / scale;
-    var cy = (e.clientY - rect.top - ty) / scale;
-    var k = (e.deltaY < 0 ? 1.1 : 0.9);
-    scale *= k;
-    tx = e.clientX - rect.left - cx * scale;
-    ty = e.clientY - rect.top - cy * scale;
-    applyTransform();
-  }, { passive: false });
-
-  host.addEventListener('mousedown', function (e) {
-    dragging = true; lastX = e.clientX; lastY = e.clientY;
-  });
-  window.addEventListener('mouseup', function () { dragging = false; });
-  window.addEventListener('mousemove', function (e) {
-    if (!dragging) return;
-    tx += (e.clientX - lastX);
-    ty += (e.clientY - lastY);
-    lastX = e.clientX; lastY = e.clientY;
-    applyTransform();
-  });
-
-  api.zoomFit = function () {
-    var rect = svg.getBoundingClientRect();
-    var bbox = gRoot.getBBox ? gRoot.getBBox() : { x: 0, y: 0, width: 1, height: 1 };
-    if (!bbox.width || !bbox.height) return;
-    var pad = 40;
-    var sx = (rect.width - pad) / bbox.width;
-    var sy = (rect.height - pad) / bbox.height;
-    scale = Math.max(0.1, Math.min(4, Math.min(sx, sy)));
-    tx = (rect.width - bbox.width * scale) / 2 - bbox.x * scale;
-    ty = (rect.height - bbox.height * scale) / 2 - bbox.y * scale;
-    applyTransform();
-  };
-  api.resetView = function () { scale = 1; tx = 0; ty = 0; applyTransform(); };
-
-  /* ---------- Data / Render ---------- */
-  api.setData = function (newData) {
-    var nodes = Array.isArray(newData && newData.nodes) ? newData.nodes : [];
-    var links = Array.isArray(newData && newData.links) ? newData.links : [];
-    data = { nodes: nodes, links: links };
-    render();
-    emit('dataChanged');
-  };
-  api.getData = function () { return data; };
-
-  function shortId(id) {
-    var s = String(id || '');
-    return s.slice(0, 6) + '…' + s.slice(-4);
+  function emit(event, payload) {
+    (state.listeners[event] || []).forEach(fn => {
+      try { fn(payload); } catch (_) {}
+    });
   }
 
-  function render() {
-    var rect = svg.getBoundingClientRect();
-    var cx = rect.width / 2, cy = rect.height / 2;
-    var center = data.nodes[0];
-    var N = Math.max(0, data.nodes.length - 1);
-    var R = Math.min(rect.width, rect.height) * 0.28;
+  /* ========= init / ensure SVG ========= */
 
-    var pos = {};
-    if (center) pos[center.id] = { x: cx, y: cy };
-    for (var i = 1; i < data.nodes.length; i++) {
-      var n = data.nodes[i];
-      var theta = (i - 1) / Math.max(1, N) * Math.PI * 2;
-      var x = cx + R * Math.cos(theta);
-      var y = cy + R * Math.sin(theta);
-      pos[n.id] = { x: x, y: y };
+  function ensureSvg() {
+    if (svg) return;
+    container = document.getElementById('graph');
+    if (!container) return;
+
+    container.innerHTML = '';
+    container.style.position = 'relative';
+
+    svg = document.createElementNS(NS, 'svg');
+    svg.classList.add('vision-graph');
+    svg.setAttribute('width', '100%');
+    svg.setAttribute('height', '100%');
+    container.appendChild(svg);
+
+    edgesLayer = document.createElementNS(NS, 'g');
+    edgesLayer.classList.add('edges');
+    svg.appendChild(edgesLayer);
+
+    nodesLayer = document.createElementNS(NS, 'g');
+    nodesLayer.classList.add('nodes');
+    svg.appendChild(nodesLayer);
+
+    // UI controls (back/forward handled by app history; we just emit events)
+    buildControls();
+  }
+
+  function buildControls() {
+    const wrap = document.createElement('div');
+    wrap.style.position = 'absolute';
+    wrap.style.top = '12px';
+    wrap.style.right = '18px';
+    wrap.style.display = 'flex';
+    wrap.style.gap = '6px';
+    wrap.style.zIndex = '3';
+
+    function ctl(label, title, handler) {
+      const btn = document.createElement('button');
+      btn.textContent = label;
+      btn.title = title;
+      btn.className = 'graph-ctl-btn';
+      btn.style.padding = '4px 8px';
+      btn.style.borderRadius = '999px';
+      btn.style.border = '1px solid rgba(148,163,184,.4)';
+      btn.style.background = 'rgba(15,23,42,.9)';
+      btn.style.color = '#e5e7eb';
+      btn.style.fontSize = '11px';
+      btn.style.cursor = 'pointer';
+      btn.addEventListener('click', handler);
+      wrap.appendChild(btn);
     }
 
-    // edges
-    gEdges.innerHTML = '';
-    for (var j = 0; j < data.links.length; j++) {
-      var L = data.links[j];
-      var pa = pos[L.a], pb = pos[L.b];
-      if (!pa || !pb) continue;
-      var line = document.createElementNS(svgNS, 'line');
-      line.setAttribute('x1', pa.x); line.setAttribute('y1', pa.y);
-      line.setAttribute('x2', pb.x); line.setAttribute('y2', pb.y);
-      line.setAttribute('class', 'edge');
-      var w = Number(L.weight || 1);
-      var sw = Math.max(1, Math.log(w + 1) + 0.5);
-      line.setAttribute('stroke-width', String(sw));
-      gEdges.appendChild(line);
+    ctl('←', 'Back (delegated to app via custom event)', () => emit('navBack'));
+    ctl('→', 'Forward (delegated to app via custom event)', () => emit('navForward'));
+    ctl('Reset', 'Reset layout', () => zoomFit());
+    ctl('Fit', 'Zoom to fit', () => zoomFit());
+
+    container.appendChild(wrap);
+  }
+
+  /* ========= layout ========= */
+
+  function layoutRadial() {
+    if (!svg) return;
+    const bbox = container.getBoundingClientRect();
+    const W = bbox.width || 800;
+    const H = bbox.height || 480;
+    const cx = W / 2;
+    const cy = H / 2;
+
+    if (!state.nodes.length) return;
+
+    // Center node: focused if present, else first node.
+    const centerId = state.focusedId || state.nodes[0].id;
+    state.focusedId = centerId;
+
+    const center = state.nodes.find(n => n.id === centerId) || state.nodes[0];
+    center.x = cx;
+    center.y = cy;
+
+    const others = state.nodes.filter(n => n !== center);
+    const r = Math.min(W, H) * 0.3;
+    const step = (2 * Math.PI) / Math.max(others.length, 1);
+
+    others.forEach((n, i) => {
+      const angle = -Math.PI / 2 + i * step;
+      n.x = cx + r * Math.cos(angle);
+      n.y = cy + r * Math.sin(angle);
+    });
+  }
+
+  /* ========= render ========= */
+
+  function clearLayer(layer) {
+    while (layer.firstChild) layer.removeChild(layer.firstChild);
+  }
+
+  function renderEdges() {
+    clearLayer(edgesLayer);
+    const links = state.links || [];
+    links.forEach(L => {
+      const src = state.nodes.find(n => n.id === (L.a || L.source));
+      const dst = state.nodes.find(n => n.id === (L.b || L.target));
+      if (!src || !dst) return;
+      const line = document.createElementNS(NS, 'line');
+      line.setAttribute('x1', src.x);
+      line.setAttribute('y1', src.y);
+      line.setAttribute('x2', dst.x);
+      line.setAttribute('y2', dst.y);
+      line.classList.add('edge');
+      edgesLayer.appendChild(line);
+    });
+  }
+
+  function hexPoints(r) {
+    const pts = [];
+    for (let i = 0; i < 6; i++) {
+      const a = Math.PI / 6 + i * (Math.PI / 3); // flat-top hex
+      pts.push(`${Math.cos(a) * r},${Math.sin(a) * r}`);
     }
+    return pts.join(' ');
+  }
 
-    // nodes
-    gNodes.innerHTML = '';
-    for (var k = 0; k < data.nodes.length; k++) {
-      var nd = data.nodes[k];
-      var p = pos[nd.id] || { x: cx, y: cy };
-      var gg = document.createElementNS(svgNS, 'g');
-      gg.setAttribute('transform', 'translate(' + p.x + ',' + p.y + ')');
-      gg.setAttribute('data-id', String(nd.id));
+  function renderNodes() {
+    clearLayer(nodesLayer);
+    const nodes = state.nodes || [];
 
-      var outer = document.createElementNS(svgNS, 'circle');
+    nodes.forEach(n => {
+      const g = document.createElementNS(NS, 'g');
+      g.classList.add('node');
+      if (n.id === state.focusedId) g.classList.add('focused');
+      g.dataset.id = n.id;
+      g.setAttribute('transform', `translate(${n.x},${n.y})`);
+
+      // outer circle
+      const outer = document.createElementNS(NS, 'circle');
+      outer.classList.add('node-outer');
       outer.setAttribute('r', 11);
-      outer.setAttribute('class', 'node-outer');
-      gg.appendChild(outer);
 
-      var inner = document.createElementNS(svgNS, 'circle');
-      inner.setAttribute('r', 5.5);
-      inner.setAttribute('class', 'node-inner');
-      gg.appendChild(inner);
+      // inner circle
+      const inner = document.createElementNS(NS, 'circle');
+      inner.classList.add('node-inner');
+      inner.setAttribute('r', 6);
 
-      // label (respect global threshold)
-      var threshold = window.__SHOW_LABELS_BELOW__ || 150;
-      if (showLabels && data.nodes.length <= threshold) {
-        var text = document.createElementNS(svgNS, 'text');
-        text.setAttribute('y', -16);
-        text.setAttribute('text-anchor', 'middle');
-        text.setAttribute('style', 'fill:#8aa3a0; font-size:10px;');
-        text.textContent = shortId(nd.id);
-        gg.appendChild(text);
-      }
+      // hex overlay (centered at 0,0, hidden via CSS until focused)
+      const hex = document.createElementNS(NS, 'polygon');
+      hex.classList.add('node-hex');
+      hex.setAttribute('points', hexPoints(8));
 
-      // events
-      (function bindEvents(nodeId, px, py) {
-        gg.addEventListener('click', function () { emit('selectNode', { id: nodeId }); });
-        gg.addEventListener('mouseenter', function () {
-          emit('hoverNode', { id: nodeId, __px: px * scale + tx, __py: py * scale + ty });
-        });
-        gg.addEventListener('mouseleave', function () { emit('hoverNode', null); });
-      })(String(nd.id), p.x, p.y);
+      // small label
+      const label = document.createElementNS(NS, 'text');
+      label.textContent = shorten(n.id);
+      label.setAttribute('x', 0);
+      label.setAttribute('y', -18);
+      label.setAttribute('text-anchor', 'middle');
+      label.setAttribute('class', 'node-label');
 
-      gNodes.appendChild(gg);
-    }
+      g.appendChild(outer);
+      g.appendChild(inner);
+      g.appendChild(hex);
+      g.appendChild(label);
 
-    // reapply halos
-    halos.forEach(function (opts, id) { applyHaloVisual(id, opts); });
-  }
-
-  /* ---------- Halos ---------- */
-  function findNodeGroup(id) {
-    // Avoid CSS.escape; simple scan
-    var list = gNodes.querySelectorAll('g[data-id]');
-    for (var i = 0; i < list.length; i++) {
-      if (String(list[i].getAttribute('data-id')).toLowerCase() === String(id).toLowerCase()) {
-        return list[i];
-      }
-    }
-    return null;
-  }
-
-  function applyHaloVisual(id, opts) {
-    var g = findNodeGroup(id);
-    if (!g) return;
-    g.classList.add('halo');
-    if (opts && opts.blocked) g.classList.add('halo-red'); else g.classList.remove('halo-red');
-    var outer = g.querySelector('.node-outer');
-    if (outer && opts && opts.color) outer.style.stroke = opts.color;
-  }
-
-  api.setHalo = function (info) {
-    if (!info || !info.id) return;
-    halos.set(info.id, info);
-    applyHaloVisual(info.id, info);
-  };
-
-  api.flashHalo = function (id) {
-    var g = findNodeGroup(id);
-    if (!g) return;
-    g.classList.add('halo');
-    g.classList.add('halo-flash');
-    setTimeout(function () { g.classList.remove('halo-flash'); }, 450);
-  };
-
-  /* ---------- Center / Fit / Labels ---------- */
-  api.centerOn = function (id, opts) {
-    opts = opts || {};
-    if (!data.nodes.length) return;
-    var idx = -1;
-    for (var i = 0; i < data.nodes.length; i++) {
-      if (String(data.nodes[i].id).toLowerCase() === String(id).toLowerCase()) { idx = i; break; }
-    }
-    if (idx <= 0) return; // already center or not found
-    var node = data.nodes.splice(idx, 1)[0];
-    data.nodes.unshift(node);
-    if (opts.animate) {
-      svg.style.transition = 'opacity .18s ease';
-      svg.style.opacity = '0.4';
-      requestAnimationFrame(function () {
-        render(); api.zoomFit(); svg.style.opacity = '1'; setTimeout(function () { svg.style.transition = ''; }, 200);
+      // interaction
+      g.addEventListener('click', () => {
+        focusNode(n.id, { emitSelect: true });
       });
-    } else { render(); }
-    emit('dataChanged');
+
+      g.addEventListener('mouseenter', () => {
+        emit('hoverNode', n);
+      });
+      g.addEventListener('mouseleave', () => {
+        emit('hoverNode', null);
+      });
+
+      nodesLayer.appendChild(g);
+
+      // Apply halo (color / blocked) if known
+      applyHaloToDom(n.id);
+    });
+  }
+
+  function shorten(id) {
+    if (!id) return '';
+    const s = String(id);
+    if (s.length <= 10) return s;
+    return `${s.slice(0, 6)}…${s.slice(-4)}`;
+  }
+
+  function applyHaloToDom(id) {
+    if (!svg) return;
+    const cfg = state.halos[id];
+    const g = nodesLayer.querySelector(`g.node[data-id="${CSS.escape(id)}"]`);
+    if (!g) return;
+    const outer = g.querySelector('.node-outer');
+    const inner = g.querySelector('.node-inner');
+
+    if (cfg && cfg.color && outer) {
+      outer.style.stroke = cfg.color;
+      inner.style.fill = cfg.color;
+    } else if (outer && inner) {
+      outer.style.stroke = 'rgba(148,163,184,0.6)';
+      inner.style.fill = 'rgba(45,212,191,1)';
+    }
+
+    if (cfg && cfg.blocked) g.classList.add('blocked');
+    else g.classList.remove('blocked');
+  }
+
+  /* ========= public ops ========= */
+
+  function setData({ nodes, links }) {
+    ensureSvg();
+    state.nodes = (nodes || []).map(n => ({
+      ...n,
+      id: String(n.id || n.address || '').toLowerCase()
+    }));
+    state.links = (links || []).map(L => ({
+      ...L,
+      a: String(L.a || L.source || '').toLowerCase(),
+      b: String(L.b || L.target || '').toLowerCase()
+    }));
+
+    if (!state.nodes.length) {
+      clearLayer(edgesLayer);
+      clearLayer(nodesLayer);
+      emit('dataChanged', { nodes: [], links: [] });
+      return;
+    }
+
+    // default focus: first node if focusedId no longer exists
+    if (!state.focusedId || !state.nodes.find(n => n.id === state.focusedId)) {
+      state.focusedId = state.nodes[0].id;
+    }
+
+    layoutRadial();
+    renderEdges();
+    renderNodes();
+
+    emit('dataChanged', { nodes: state.nodes, links: state.links });
+    emit('viewportChanged');
+  }
+
+  function getData() {
+    return {
+      nodes: state.nodes.slice(),
+      links: state.links.slice()
+    };
+  }
+
+  // Called by app.js with result object or { id, color, blocked, intensity, pulse, focused }
+  function setHalo(obj) {
+    if (!obj) return;
+    const cfg = typeof obj === 'object' ? obj : { id: obj };
+    const id = String(cfg.id || '').toLowerCase();
+    if (!id) return;
+
+    const prev = state.halos[id] || {};
+    state.halos[id] = {
+      ...prev,
+      color: cfg.color || prev.color || '#22d3ee',
+      blocked: !!(cfg.blocked || cfg.block),
+      intensity: cfg.intensity != null ? cfg.intensity : (prev.intensity || 0.7)
+    };
+
+    if (cfg.focused) {
+      state.focusedId = id;
+      // refresh focus classes
+      nodesLayer.querySelectorAll('g.node').forEach(g => {
+        g.classList.toggle('focused', g.dataset.id === id);
+      });
+    }
+
+    applyHaloToDom(id);
+  }
+
+  function focusNode(id, { emitSelect = false } = {}) {
+    state.focusedId = String(id || '').toLowerCase();
+    // update classes
+    nodesLayer.querySelectorAll('g.node').forEach(g => {
+      g.classList.toggle('focused', g.dataset.id === state.focusedId);
+    });
+    // ensure halo applied for focused node
+    applyHaloToDom(state.focusedId);
+
+    const node = state.nodes.find(n => n.id === state.focusedId);
+    if (emitSelect && node) emit('selectNode', node);
+  }
+
+  function centerOn(id) {
+    // For radial layout, centering is just "focused node becomes center",
+    // app takes care of regenerating neighborhood.
+    focusNode(id, { emitSelect: true });
+  }
+
+  function zoomFit() {
+    // For now, radial layout already fills the card; we simply emit viewportChanged
+    emit('viewportChanged');
+  }
+
+  /* ========= export global ========= */
+
+  window.graph = {
+    setData,
+    getData,
+    on,
+    setHalo,
+    centerOn,
+    zoomFit
   };
-
-  api.setLabelVisibility = function (visible) {
-    showLabels = !!visible;
-    render();
-  };
-
-  /* ---------- Export API ---------- */
-  window.graph = api;
-
 })();
