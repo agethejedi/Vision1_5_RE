@@ -1,6 +1,8 @@
 // ui/ScoreMeter.js — Vision 1_5_RE
 // Compact gauge widget used by app.js via window.ScoreMeter('#scorePanel')
 
+import { colorForScore, bandForScore } from '../lib/risk-colors.js';
+
 (function () {
   function createMeter(root) {
     root.innerHTML = `
@@ -35,14 +37,6 @@
     function clamp(x, lo = 0, hi = 100) {
       x = Number(x) || 0;
       return Math.max(lo, Math.min(hi, x));
-    }
-
-    function bandForScore(s) {
-      if (s >= 80) return "High";
-      if (s >= 60) return "Elevated";
-      if (s >= 40) return "Moderate";
-      if (s >= 20) return "Low";
-      return "Very low";
     }
 
     function setScore(val) {
@@ -82,9 +76,6 @@
         ? res.score
         : (typeof res.risk_score === 'number' ? res.risk_score : 0);
 
-      setScore(score);
-      scoreSub.textContent = bandForScore(score);
-
       const blocked = !!(
         res.block ||
         res.blocked ||
@@ -93,9 +84,20 @@
         res.explain?.ofacHit ||
         res.ofac === true
       );
-      setBlocked(blocked);
 
+      // Single source: colors + bands
+      const color = colorForScore(score, blocked);
+      const band  = bandForScore(score, blocked);
+
+      // Apply meter visuals
+      setScore(score);
+      scoreSub.textContent = band;
+      setBlocked(blocked);
       setReasons(res.breakdown || res.reasons || res.risk_factors || []);
+
+      // Sync ring color to the shared palette
+      panelEl.style.setProperty('--ring-color', color);
+      panelEl.dataset.rxlBand = band;
     }
 
     function getScore() {
@@ -105,6 +107,7 @@
     return { setScore, setBlocked, setReasons, setSummary, getScore };
   }
 
+  // Public factory
   window.ScoreMeter = function (selector) {
     const el = (typeof selector === 'string')
       ? document.querySelector(selector)
