@@ -1,5 +1,5 @@
 // graph.js — Vision 1_5_RE
-// Radial wallet graph with focused-node hexagon + pulse halo.
+// Radial wallet graph with focused-node hexagon, pulse halo, and mouse-wheel zoom.
 // Exposes window.graph: { setData, getData, on, setHalo, centerOn, zoomFit }
 
 const NS = 'http://www.w3.org/2000/svg';
@@ -11,12 +11,19 @@ const NS = 'http://www.w3.org/2000/svg';
     halos: {},        // id -> { color, blocked, intensity }
     focusedId: null,
     listeners: {},    // event -> [fn]
+    viewWidth: 800,
+    viewHeight: 480
   };
 
   let container = null;
   let svg = null;
   let edgesLayer = null;
   let nodesLayer = null;
+
+  // zoom
+  let zoom = 1;
+  const ZOOM_MIN = 0.5;
+  const ZOOM_MAX = 3.0;
 
   /* ========= event bus ========= */
 
@@ -55,8 +62,8 @@ const NS = 'http://www.w3.org/2000/svg';
     nodesLayer.classList.add('nodes');
     svg.appendChild(nodesLayer);
 
-    // UI controls (back/forward handled by app history; we just emit events)
     buildControls();
+    attachWheelZoom();
   }
 
   function buildControls() {
@@ -84,12 +91,41 @@ const NS = 'http://www.w3.org/2000/svg';
       wrap.appendChild(btn);
     }
 
-    ctl('←', 'Back (delegated to app via custom event)', () => emit('navBack'));
-    ctl('→', 'Forward (delegated to app via custom event)', () => emit('navForward'));
-    ctl('Reset', 'Reset layout', () => zoomFit());
-    ctl('Fit', 'Zoom to fit', () => zoomFit());
+    // back / forward are delegated to app via events (history is in app.js)
+    ctl('←', 'Back', () => emit('navBack'));
+    ctl('→', 'Forward', () => emit('navForward'));
+    ctl('Reset', 'Reset zoom & layout', () => {
+      zoom = 1;
+      updateZoomViewBox();
+      emit('viewportChanged');
+    });
+    ctl('Fit', 'Zoom to fit', () => {
+      zoomFit();
+    });
 
     container.appendChild(wrap);
+  }
+
+  function attachWheelZoom() {
+    if (!container) return;
+    container.addEventListener('wheel', (e) => {
+      if (!svg) return;
+      e.preventDefault();
+      const delta = e.deltaY;
+      const factor = delta > 0 ? 0.9 : 1.1;
+      zoom = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom * factor));
+      updateZoomViewBox();
+      emit('viewportChanged');
+    }, { passive: false });
+  }
+
+  function updateZoomViewBox() {
+    if (!svg) return;
+    const W = state.viewWidth || 800;
+    const H = state.viewHeight || 480;
+    const vw = W / zoom;
+    const vh = H / zoom;
+    svg.setAttribute('viewBox', `0 0 ${vw} ${vh}`);
   }
 
   /* ========= layout ========= */
@@ -102,9 +138,13 @@ const NS = 'http://www.w3.org/2000/svg';
     const cx = W / 2;
     const cy = H / 2;
 
+    state.viewWidth = W;
+    state.viewHeight = H;
+
+    svg.setAttribute('viewBox', `0 0 ${W / zoom} ${H / zoom}`);
+
     if (!state.nodes.length) return;
 
-    // Center node: focused if present, else first node.
     const centerId = state.focusedId || state.nodes[0].id;
     state.focusedId = centerId;
 
@@ -166,22 +206,18 @@ const NS = 'http://www.w3.org/2000/svg';
       g.dataset.id = n.id;
       g.setAttribute('transform', `translate(${n.x},${n.y})`);
 
-      // outer circle
       const outer = document.createElementNS(NS, 'circle');
       outer.classList.add('node-outer');
       outer.setAttribute('r', 11);
 
-      // inner circle
       const inner = document.createElementNS(NS, 'circle');
       inner.classList.add('node-inner');
       inner.setAttribute('r', 6);
 
-      // hex overlay (centered at 0,0, hidden via CSS until focused)
       const hex = document.createElementNS(NS, 'polygon');
       hex.classList.add('node-hex');
       hex.setAttribute('points', hexPoints(8));
 
-      // small label
       const label = document.createElementNS(NS, 'text');
       label.textContent = shorten(n.id);
       label.setAttribute('x', 0);
@@ -194,7 +230,6 @@ const NS = 'http://www.w3.org/2000/svg';
       g.appendChild(hex);
       g.appendChild(label);
 
-      // interaction
       g.addEventListener('click', () => {
         focusNode(n.id, { emitSelect: true });
       });
@@ -208,7 +243,6 @@ const NS = 'http://www.w3.org/2000/svg';
 
       nodesLayer.appendChild(g);
 
-      // Apply halo (color / blocked) if known
       applyHaloToDom(n.id);
     });
   }
@@ -221,14 +255,14 @@ const NS = 'http://www.w3.org/2000/svg';
   }
 
   function applyHaloToDom(id) {
-    if (!svg) return;
+    if (!nodesLayer) return;
     const cfg = state.halos[id];
     const g = nodesLayer.querySelector(`g.node[data-id="${CSS.escape(id)}"]`);
     if (!g) return;
     const outer = g.querySelector('.node-outer');
     const inner = g.querySelector('.node-inner');
 
-    if (cfg && cfg.color && outer) {
+    if (cfg && cfg.color && outer && inner) {
       outer.style.stroke = cfg.color;
       inner.style.fill = cfg.color;
     } else if (outer && inner) {
@@ -261,7 +295,6 @@ const NS = 'http://www.w3.org/2000/svg';
       return;
     }
 
-    // default focus: first node if focusedId no longer exists
     if (!state.focusedId || !state.nodes.find(n => n.id === state.focusedId)) {
       state.focusedId = state.nodes[0].id;
     }
@@ -281,7 +314,6 @@ const NS = 'http://www.w3.org/2000/svg';
     };
   }
 
-  // Called by app.js with result object or { id, color, blocked, intensity, pulse, focused }
   function setHalo(obj) {
     if (!obj) return;
     const cfg = typeof obj === 'object' ? obj : { id: obj };
@@ -298,10 +330,11 @@ const NS = 'http://www.w3.org/2000/svg';
 
     if (cfg.focused) {
       state.focusedId = id;
-      // refresh focus classes
-      nodesLayer.querySelectorAll('g.node').forEach(g => {
-        g.classList.toggle('focused', g.dataset.id === id);
-      });
+      if (nodesLayer) {
+        nodesLayer.querySelectorAll('g.node').forEach(g => {
+          g.classList.toggle('focused', g.dataset.id === id);
+        });
+      }
     }
 
     applyHaloToDom(id);
@@ -309,11 +342,11 @@ const NS = 'http://www.w3.org/2000/svg';
 
   function focusNode(id, { emitSelect = false } = {}) {
     state.focusedId = String(id || '').toLowerCase();
-    // update classes
-    nodesLayer.querySelectorAll('g.node').forEach(g => {
-      g.classList.toggle('focused', g.dataset.id === state.focusedId);
-    });
-    // ensure halo applied for focused node
+    if (nodesLayer) {
+      nodesLayer.querySelectorAll('g.node').forEach(g => {
+        g.classList.toggle('focused', g.dataset.id === state.focusedId);
+      });
+    }
     applyHaloToDom(state.focusedId);
 
     const node = state.nodes.find(n => n.id === state.focusedId);
@@ -321,13 +354,12 @@ const NS = 'http://www.w3.org/2000/svg';
   }
 
   function centerOn(id) {
-    // For radial layout, centering is just "focused node becomes center",
-    // app takes care of regenerating neighborhood.
     focusNode(id, { emitSelect: true });
   }
 
   function zoomFit() {
-    // For now, radial layout already fills the card; we simply emit viewportChanged
+    zoom = 1;
+    updateZoomViewBox();
     emit('viewportChanged');
   }
 
